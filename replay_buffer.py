@@ -5,7 +5,7 @@ import numpy as np
 class ReplayBuffer:
     """Fixed-size buffer to store experience tuples."""
 
-    def __init__(self, state_size, action_size, action_type, buffer_size=int(1e5), batch_size=128, seed=0,\
+    def __init__(self, state_shape, action_size, action_type, num_agents=1, buffer_size=int(1e5), batch_size=128, seed=0,\
                  no_reward_value    = 0.0,\
                  no_reward_dropout  = 0.0,\
                  pytorch_device     = None):
@@ -13,7 +13,7 @@ class ReplayBuffer:
 
         Params
         ======
-            state_size  (int): dimension of state vector
+            state_shape (tuple:int): dimension of state vector
             action_size (int): dimension of action vector ( 1 for simple DQN)
             action_type (int): np.float32 for DDPG   np.int8 or np.int32 for DQN
             buffer_size (int): maximum size of buffer
@@ -21,8 +21,9 @@ class ReplayBuffer:
             seed (int): random seed
             pytorch_device: torch.device("cuda:0" if use_cuda else "cpu")
         """
-        self.state_size  = state_size
+        self.state_shape = state_shape
         self.action_size = action_size
+        self.num_agents  = num_agents
         self.action_type = action_type
         self.batch_size  = batch_size
         self.buffer_size = buffer_size
@@ -30,25 +31,31 @@ class ReplayBuffer:
         self.rand        = np.random.default_rng(seed)
         self.no_reward_value   = no_reward_value
         self.no_reward_dropout = no_reward_dropout
-        self.pytorch_device = pytorch_device
-        self.states      = np.empty((self.buffer_size,self.state_size),  dtype=np.float32)
-        self.actions     = np.empty((self.buffer_size,self.action_size), dtype=action_type)
-        self.rewards     = np.empty((self.buffer_size,1),                dtype=np.float32)
-        self.next_states = np.empty((self.buffer_size,self.state_size),  dtype=np.float32)
-        self.dones       = np.empty((self.buffer_size,1),                dtype=np.float32)
+        self.pytorch_device    = pytorch_device
+        self.states, self.actions, self.rewards, self.next_states, self.dones = self.create_buffers(self.buffer_size)
+        self.res_states, self.res_actions, self.res_rewards, self.res_next_states, self.res_dones = self.create_buffers(self.batch_size)
         
-        self.res_states      = np.empty((self.batch_size,self.state_size),  dtype=np.float32)
-        self.res_actions     = np.empty((self.batch_size,self.action_size), dtype=action_type)
-        self.res_rewards     = np.empty((self.batch_size,1),                dtype=np.float32)
-        self.res_next_states = np.empty((self.batch_size,self.state_size),  dtype=np.float32)
-        self.res_dones       = np.empty((self.batch_size,1),                dtype=np.float32)
         self.reset()
 
+    def to_tuple(size):
+        return (size,) if isinstance(size,int) else size
+        
+    def create_buffers(self, rows):
+        state_shape = ReplayBuffer.to_tuple(self.state_shape)
+        num_agents  = (self.num_agents,) if self.num_agents > 1 else ()
+        action_size = ReplayBuffer.to_tuple(self.action_size)
+        return (np.empty((rows,)+num_agents+state_shape, dtype=np.float32),\
+                np.empty((rows,)+num_agents+action_size, dtype=self.action_type),\
+                np.empty((rows,self.num_agents),         dtype=np.float32),\
+                np.empty((rows,)+num_agents+state_shape, dtype=np.float32),\
+                np.empty((rows,1),                       dtype=np.float32))
+    
+    
     def clone(self):
-        return ReplayBuffer(state_size=self.state_size, action_size=self.action_size, action_type=self.action_type,\
-        buffer_size=self.buffer_size, batch_size=self.batch_size, seed=self.seed,\
-        no_reward_value=self.no_reward_value, no_reward_dropout=self.no_reward_dropout,\
-        pytorch_device=self.pytorch_device)
+        return ReplayBuffer(state_shape=self.state_shape, action_size=self.action_size, num_agents=num_agents,\
+                            action_type=self.action_type, buffer_size=self.buffer_size, batch_size=self.batch_size, seed=self.seed,\
+                            no_reward_value=self.no_reward_value, no_reward_dropout=self.no_reward_dropout,\
+                            pytorch_device=self.pytorch_device)
 
     def reset(self):
         self.current_len = 0
