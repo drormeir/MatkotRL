@@ -1,5 +1,5 @@
 import numpy as np
-from replay_buffer import ReplayBuffer
+from replay_buffer import BalancedReplayBuffer
 from OU_noise import OUNoise
 from actor_critic_model import Actor, Critic
 
@@ -15,14 +15,16 @@ def next_value(curr_value, target_value):
     ret = curr_value / (1.0 + curr_value - target_value)
     return min(max(ret,target_value),curr_value) # numerical fix
 
-class DDPG_Agent():
+class Multi_MA_DDPG():
     """Interacts with and learns from the environment."""
     
     def __init__(self, state_shape, action_size,\
                  num_agents         = 1,\
                  replay_buffer_size = int(1e6),\
                  replay_batch_size  = 128,\
-                 random_seed        = 1,\
+                 duplicate_batch    = 1,\
+                 set_modify_batch   = None,\
+                 seed               = 1,\
                  gamma              = 0.95,\
                  tau                = 1e-3,\
                  update_every       = 20,\
@@ -34,7 +36,6 @@ class DDPG_Agent():
                  noise_sigma        = 0.2,\
                  noise_theta        = 0.15,\
                  no_reward_value    = -0.1,\
-                 no_reward_dropout  = 0.9,\
                  actor_arch         = ['b',128,'b','r',256,'b','r'],\
                  critic_arch        = [['b',128],['b',64],['b','r',256,'b','r']],\
                  use_cuda           = False,\
@@ -48,7 +49,7 @@ class DDPG_Agent():
             num_agents (int):         number of agents
             replay_buffer_size (int): replay buffer size
             replay_batch_size (int):  minibatch size
-            random_seed (int):        random seed
+            seed (int):               random seed
             gamma(float):             discount factor of next state value
             tau(float):               for soft update of target parameters
             lr_actor(float):          learning rate of the actor 
@@ -59,7 +60,7 @@ class DDPG_Agent():
         self.action_size      = action_size
         self.num_agents       = num_agents
         self.gamma            = gamma
-        self.current_gamma    = 0 # next state value is irrelevant at first steps, and grows upto gamma during trainings
+        self.seed             = seed
         if use_cuda:
             use_cuda = torch.cuda.is_available()
         device_name = "cuda:0" if use_cuda else "cpu"
@@ -67,7 +68,7 @@ class DDPG_Agent():
             print("Initializing DDPG_Agent with PyTorch device named:",device_name)
             print("replay_buffer_size =",replay_buffer_size)
             print("replay_batch_size  =",replay_batch_size)
-            print("random_seed        =",random_seed)
+            print("seed               =",seed)
             print("gamma              =",gamma)
             print("tau                =",tau)
             print("update_every       =",update_every)
@@ -79,67 +80,68 @@ class DDPG_Agent():
             print("noise_sigma        =",noise_sigma)
             print("noise_theta        =",noise_theta)
             print("no_reward_value    =",no_reward_value)
-            print("no_reward_dropout  =",no_reward_dropout)
             print("actor_arch         =",actor_arch)
             print("critic_arch        =",critic_arch)
         self.device = torch.device(device_name)
-        torch.manual_seed(random_seed)
+        torch.manual_seed(seed)
         # Actor Network (w/ Target Network)
         self.actor_local       = Actor(state_shape=state_shape, action_size=action_size, layers_arch=actor_arch,\
-                                       pytorch_device=self.device)
+                                       pytorch_device=self.device, verbose_level=self.verbose_level)
         self.actor_target      = self.actor_local.clone()
         self.actor_lr_max      = lr_actor
         self.actor_clip_grad   = actor_clip_grad
 
         # Critic Network (w/ Target Network)
         self.critic_local      = Critic(state_shape=state_shape, action_size=action_size, num_agents=num_agents,\
-                                        layers_arch=critic_arch, pytorch_device=self.device)
+                                        layers_arch=critic_arch, pytorch_device=self.device, verbose_level=self.verbose_level)
         self.critic_target     = self.critic_local.clone()
         self.critic_lr_max     = lr_critic
         self.critic_clip_grad  = critic_clip_grad
 
         self.lr_min            = 1e-5
         self.lr_decay          = 0.5
-        self.reset_lr()
-        self.noise             = OUNoise(size=action_size, seed=random_seed, sigma=noise_sigma, theta=noise_theta)
+        self.noise             = OUNoise(size=(num_agents,action_size), seed=seed, sigma=noise_sigma, theta=noise_theta)
 
         # Replay memory
-        self.memory            = ReplayBuffer(state_shape=state_shape, action_size=action_size, num_agents=num_agents,\
-                                              action_type=np.float32, buffer_size=replay_buffer_size, batch_size=replay_batch_size,\
-                                              seed=random_seed, no_reward_value=no_reward_value, no_reward_dropout=no_reward_dropout,\
-                                              pytorch_device=self.device)
+        self.force_reward1     = critic_arch[-1][-1] == 1
+        self.memory            = BalancedReplayBuffer(state_shape=state_shape, action_size=action_size, num_agents=num_agents,\
+                                                      action_type=np.float32, buffer_size=replay_buffer_size,\
+                                                      batch_size=replay_batch_size, seed=seed, force_reward1=self.force_reward1,\
+                                                      duplicate_batch=duplicate_batch, set_modify_batch=set_modify_batch,\
+                                                      no_reward_value=no_reward_value, pytorch_device=self.device)
         self.update_every      = update_every
-        self.last_update       = 0
-        self.n_steps           = 0
         self.update_times      = update_times
         self.tau               = tau
-        self.current_tau       = 1.0
-        self.update_target_networks() # current_tau == 1   --> copy networks
-        self.prepare_for_new_episode()
-
-
+        self.constant_action   = None
+        self.reset()
+        
     def prepare_for_new_episode(self):
         pass
 
     def act(self, state, add_noise=None):
         """Returns actions for given state as per current policy."""
-        raw_action = self.actor_local.eval_numpy(state)
-        if add_noise is not None and add_noise:
-            raw_action += self.noise.sample()
+        if self.constant_action is not None:
+            raw_action = self.constant_action
+        else:
+            raw_action = self.actor_local.eval_numpy(state)
+            if add_noise is not None and add_noise:
+                raw_action += self.noise.sample()
         self.raw_action = raw_action # save logits to be used in step()
         return np.tanh(raw_action) # convert logit to real actions [-1,+1] for environment
 
     def random_action(self):
-        return np.random.uniform(low=-1.0,high=1.0,size=self.action_size)
+        return np.random.uniform(low=-1.0,high=1.0,size=(self.num_agents,self.action_size))
 
     def step(self, state, reward, next_state, done):
         """Save experience in replay memory, and use random sample from buffer to learn."""
+        if self.force_reward1:
+            reward = np.sum(reward)
+            done = np.any(done)
         self.memory.add(state, self.raw_action, reward, next_state, done)
-        self.n_steps += 1
-        if not done and self.n_steps < self.last_update + self.update_every:
+        mem_len = self.memory.len_non_zero()
+        if not done and mem_len < self.last_update + self.update_every:
             return
-        self.last_update = self.n_steps
-
+        self.last_update = mem_len
         for i_update in range(self.update_times):
             # Learn, if enough samples are available in memory
             experiences = self.memory.sample()
@@ -157,7 +159,6 @@ class DDPG_Agent():
                 gamma (float): discount factor
             """
             states, actions, rewards, next_states, dones = experiences
-
             # ---------------------------- update critic ---------------------------- #
             # Get predicted next-state actions and Q values from target models
             actions_next   = self.actor_target(next_states)
@@ -220,6 +221,10 @@ class DDPG_Agent():
     def get_noise_level(self):
         return self.noise.calc_scale()
     
+    def zero_rewards_status(self):
+        return "replay zero rewards: internal={:5.2f}% external={:5.2f}%".format(self.memory.no_reward_internal_ratio()*100.0,\
+                                                                                 self.memory.no_reward_external_ratio()*100.0)
+        
     def learning_rate_step(self):
         if self.lr_at_minimum:
             return
@@ -247,6 +252,17 @@ class DDPG_Agent():
         self.lr_at_minimum    = False
 
 
+    def reset(self):
+        self.noise.reset()
+        self.memory.reset()
+        self.last_update       = 0
+        self.current_gamma    = 0 # next state value is irrelevant at first steps, and grows upto gamma during trainings
+        self.current_tau       = 1.0
+        torch.manual_seed(self.seed)
+        self.reset_lr()
+        self.update_target_networks() # current_tau == 1   --> copy networks
+        self.prepare_for_new_episode()
+        
     def save(self, filename):
         shutil.rmtree(filename,ignore_errors=True) # avoid file not found error
         os.makedirs(filename)
