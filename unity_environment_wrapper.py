@@ -84,20 +84,16 @@ class unity_env(UnityEnvironment):
             print("num_episode_search =",num_episode_search)
             print("max_num_episodes   =",max_num_episodes)
             print("score_window_size  =",self.scores_window.maxlen)
-
         agent.reset_noise_level()                    # initialize noise
         len_save_scores = 0
         while self.improvement >= 0:
-            #curr_theta = agent.noise.theta
-            #curr_sigma = agent.noise.sigma
-            #curr_noise_level = agent.get_noise_level()
             self.train_agent_on_single_episode(agent)
+            optimistic_episode_score = np.max(self.episode_score)
             real_episode_score = [s for s in np.asarray(self.episode_score) if abs(s) > 1e-8]
             real_episode_score = 0 if len(real_episode_score) < 1 else np.max(real_episode_score)
             # decay noise only if new episode score is smaller than previous episode score
-            if np.abs(real_episode_score) > 0 and len(self.all_scores) > 0 and real_episode_score < self.all_scores[-1]:
+            if len(self.all_scores) > 0 and real_episode_score < self.all_scores[-1]:
                 agent.scale_noise(noise_decay)
-            optimistic_episode_score = np.max(self.episode_score)
             current_score_is_ok = optimistic_episode_score > self.curr_window_average # compare value before updating window
             self.scores_window.append(optimistic_episode_score)
             self.all_scores.append(real_episode_score)
@@ -145,7 +141,7 @@ class unity_env(UnityEnvironment):
         self.__set_curr_score_window_as_best()
         self.__set_curr_score_window_as_best_test()
         self.improvement       = 0
-        
+
     def train_agent_on_single_episode(self, agent, max_steps_in_single_episode=None):
         if max_steps_in_single_episode is None:
             max_steps_in_single_episode = self.max_steps_in_single_episode

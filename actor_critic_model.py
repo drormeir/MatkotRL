@@ -96,13 +96,15 @@ class Actor(nn.Module):
     def eval_numpy(self, state):
         if state.ndim == 1:
             state = state.reshape((1,len(state)))
-        state = torch.from_numpy(state).float()
+        state_torch = torch.from_numpy(state).float()
         if self.pytorch_device:
-            state = state.to(self.pytorch_device)
+            state_torch = state_torch.to(self.pytorch_device)
         self.eval() # set model to "eval" mode
         with torch.no_grad():
-            action = self(state).cpu().data.numpy()
+            action = self(state_torch).cpu().data.numpy()
         self.train() # set model to "train" mode
+        if np.any(np.isnan(action)):
+            raise Exception("Error! NaN ancountered in Actor.eval_numpy() with state=\n{}\nresult action=\n{}".format(state,action))
         return action
     
 class Critic(nn.Module):

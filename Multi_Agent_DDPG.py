@@ -1,5 +1,5 @@
 import numpy as np
-from replay_buffer import BalancedReplayBuffer
+from replay_buffer import EpisodesReplayBuffer
 from OU_noise import OUNoise
 from actor_critic_model import Actor, Critic
 
@@ -22,7 +22,7 @@ class Multi_MA_DDPG():
                  num_agents         = 1,\
                  replay_buffer_size = int(1e6),\
                  replay_batch_size  = 128,\
-                 duplicate_batch    = 1,\
+                 duplicate_augmented_times    = 1,\
                  set_modify_batch   = None,\
                  seed               = 1,\
                  gamma              = 0.95,\
@@ -104,15 +104,14 @@ class Multi_MA_DDPG():
 
         # Replay memory
         self.force_reward1     = critic_arch[-1][-1] == 1
-        self.memory            = BalancedReplayBuffer(state_shape=state_shape, action_size=action_size, num_agents=num_agents,\
+        self.memory     = EpisodesReplayBuffer(state_shape=state_shape, action_size=action_size, num_agents=num_agents,\
                                                       action_type=np.float32, buffer_size=replay_buffer_size,\
                                                       batch_size=replay_batch_size, seed=seed, force_reward1=self.force_reward1,\
-                                                      duplicate_batch=duplicate_batch, set_modify_batch=set_modify_batch,\
+                                                      duplicate_augmented_times=duplicate_augmented_times, set_modify_batch=set_modify_batch,\
                                                       no_reward_value=no_reward_value, pytorch_device=self.device)
         self.update_every      = update_every
         self.update_times      = update_times
         self.tau               = tau
-        self.constant_action   = None
         self.reset()
         
     def prepare_for_new_episode(self):
@@ -120,26 +119,16 @@ class Multi_MA_DDPG():
 
     def act(self, state, add_noise=None):
         """Returns actions for given state as per current policy."""
-        if self.constant_action is not None:
-            raw_action = self.constant_action
-        else:
-            raw_action = self.actor_local.eval_numpy(state)
-            if add_noise is not None and add_noise:
-                raw_action += self.noise.sample()
-        self.raw_action = raw_action # save logits to be used in step()
-        return np.tanh(raw_action) # convert logit to real actions [-1,+1] for environment
-
-    def random_action(self):
-        return np.random.uniform(low=-1.0,high=1.0,size=(self.num_agents,self.action_size))
+        self.raw_action = self.actor_local.eval_numpy(state)
+        if add_noise is not None and add_noise:
+            self.raw_action += self.noise.sample()
+        return np.tanh(self.raw_action) # convert logit to real actions [-1,+1] for environment
 
     def step(self, state, reward, next_state, done):
         """Save experience in replay memory, and use random sample from buffer to learn."""
-        if self.force_reward1:
-            reward = np.sum(reward)
-            done = np.any(done)
         self.memory.add(state, self.raw_action, reward, next_state, done)
-        mem_len = self.memory.len_non_zero()
-        if not done and mem_len < self.last_update + self.update_every:
+        mem_len = len(self.memory)
+        if not np.any(done) and mem_len < self.last_update + self.update_every:
             return
         self.last_update = mem_len
         for i_update in range(self.update_times):
@@ -255,9 +244,9 @@ class Multi_MA_DDPG():
     def reset(self):
         self.noise.reset()
         self.memory.reset()
-        self.last_update       = 0
-        self.current_gamma    = 0 # next state value is irrelevant at first steps, and grows upto gamma during trainings
-        self.current_tau       = 1.0
+        self.last_update     = 0
+        self.current_gamma   = 0 # next state value is irrelevant at first steps, and grows upto gamma during trainings
+        self.current_tau     = 1.0
         torch.manual_seed(self.seed)
         self.reset_lr()
         self.update_target_networks() # current_tau == 1   --> copy networks
