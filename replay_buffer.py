@@ -78,6 +78,9 @@ class ReplayBufferBatch:
         assert not np.any(np.isnan(self.next_states))
         assert not np.any(np.isnan(self.dones))
 
+    def npRewardSize(self, fillValue):
+        return fillValue if self.single_reward else np.full(shape=(self.num_agents,), fill_value=fillValue, dtype=np.float32)
+
     def printSizes(self, name=None):
         if name is not None:
             print(name)
@@ -111,7 +114,7 @@ class ReplayBufferFull:
         
     def reset(self):
         self.current_len = 0
-        self.total_score = 0 if self.replayBufferBatch.single_reward else np.zeros((num_agents,), dtype=np.float32)
+        self.total_score = self.replayBufferBatch.npRewardSize(0.f)
 
     def __iadd__(self, other):
         for i in range(min(other.current_len,other.buffer_size)):
@@ -146,10 +149,12 @@ class ReplayBufferFull:
         """Randomly sample a batch of experiences from memory."""
         if batch_size < 1:
             return True
-        if self.current_len < (1 if replace else batch_size):
+        minimal_len = 1 if replace else batch_size
+        current_len = min(self.current_len, self.buffer_size)
+        if current_len < minimal_len:
             return False
         ind_stop = ind_target + batch_size
-        indexes  =  self.rand.choice(range(self.current_len), size=batch_size,replace=replace)
+        indexes  =  self.rand.choice(range(current_len), size=batch_size,replace=replace)
         self.replayBufferBatch.states[ind_target:ind_stop,:]      = self.states[indexes,:]
         self.replayBufferBatch.actions[ind_target:ind_stop,:]     = self.actions[indexes,:]
         self.replayBufferBatch.rewards[ind_target:ind_stop,:]     = self.rewards[indexes,:]
@@ -324,7 +329,7 @@ class ZeroPosNegReplayBufferInterface:
         self.positives.printSizes(name + ".positives")
         self.negatives.printSizes(name + ".positives")
         self.zeros.printSizes(name + ".zeros")
-   
+
 ####################################################################################        
 class ZeroPosNegReplayBuffer(ReplayBufferBatch):
     """Fixed-size buffer to store experience tuples."""
@@ -401,8 +406,9 @@ class EpisodesReplayBuffer(ReplayBufferBatch):
                  no_reward_value    = None, set_modify_batch=None, set_modify_episode=None, pytorch_device     = None):
 
         ReplayBufferBatch.__init__(self, state_shape=state_shape, action_size=action_size,\
-                                  action_type=action_type, num_agents=num_agents, batch_size=batch_size, force_reward1=force_reward1,\
-                                  duplicate_augmented_times=duplicate_augmented_times, set_modify_batch=set_modify_batch, pytorch_device=pytorch_device)
+                                   action_type=action_type, num_agents=num_agents, batch_size=batch_size,\
+                                   force_reward1=force_reward1, duplicate_augmented_times=duplicate_augmented_times,\
+                                   set_modify_batch=set_modify_batch, pytorch_device=pytorch_device)
 
         self.long_term_mem     = ZeroPosNegReplayBufferInterface(replayBufferBatch=self,  buffer_size=buffer_size, seed=seed,\
                                             no_reward_value=no_reward_value)
@@ -414,7 +420,7 @@ class EpisodesReplayBuffer(ReplayBufferBatch):
         self.reset()
 
     def reset(self):
-        self.highest_score   = -np.inf if self.single_reward else np.full(shape=(num_agents,), fill_value=-np.inf)
+        self.highest_score   = self.npRewardSize(-np.inf)
         self.long_term_mem.reset()
         self.curr_episode_mem.reset()
         self.best_episode_mem.reset()
